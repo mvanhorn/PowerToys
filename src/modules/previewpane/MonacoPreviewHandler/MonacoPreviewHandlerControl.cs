@@ -4,6 +4,7 @@
 
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 using Common;
@@ -133,10 +134,14 @@ namespace Microsoft.PowerToys.PreviewHandler.Monaco
                             .ConfigureAwait(true).GetAwaiter();
                     webView2EnvironmentAwaiter.OnCompleted(async () =>
                     {
-                        _loadingBar.Value = 60;
-                        this.Update();
                         try
                         {
+                            if (!this.Disposing && !this.IsDisposed && this.IsHandleCreated)
+                            {
+                                _loadingBar.Value = 60;
+                                this.Update();
+                            }
+
                             if (CoreWebView2Environment.GetAvailableBrowserVersionString() == null)
                             {
                                 throw new WebView2RuntimeNotFoundException();
@@ -144,13 +149,21 @@ namespace Microsoft.PowerToys.PreviewHandler.Monaco
 
                             _webView2Environment = webView2EnvironmentAwaiter.GetResult();
 
-                            _loadingBar.Value = 70;
-                            this.Update();
+                            if (!this.Disposing && !this.IsDisposed && this.IsHandleCreated)
+                            {
+                                _loadingBar.Value = 70;
+                                this.Update();
+                            }
 
                             // Initialize WebView
                             try
                             {
                                 await _webView.EnsureCoreWebView2Async(_webView2Environment).ConfigureAwait(true);
+
+                                if (this.Disposing || this.IsDisposed || !this.IsHandleCreated)
+                                {
+                                    return;
+                                }
 
                                 _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(FilePreviewCommon.MonacoHelper.VirtualHostName, FilePreviewCommon.MonacoHelper.MonacoDirectory, CoreWebView2HostResourceAccessKind.Allow);
 
@@ -175,6 +188,11 @@ namespace Microsoft.PowerToys.PreviewHandler.Monaco
                         {
                             Logger.LogWarning("WebView2 was not found:");
                             Logger.LogWarning(e.Message);
+                            if (this.Disposing || this.IsDisposed || !this.IsHandleCreated)
+                            {
+                                return;
+                            }
+
                             Controls.Remove(_loading);
                             Controls.Remove(_loadingBar);
                             Controls.Remove(_loadingBackground);
@@ -195,6 +213,34 @@ namespace Microsoft.PowerToys.PreviewHandler.Monaco
                             downloadLink.Height = TextRenderer.MeasureText(Resources.Download_WebView2, errorMessage.Font).Height;
                             downloadLink.ForeColor = Settings.TextColor;
                             Controls.Add(downloadLink);
+                        }
+                        catch (COMException e)
+                        {
+                            // Async void: the synchronous caller cannot observe GetResult or EnsureCoreWebView2Async failures.
+                            Logger.LogError($"COMException caught while initializing WebView2. HRESULT: 0x{e.HResult.ToString("X8", CultureInfo.InvariantCulture)}.", e);
+                            if (this.Disposing || this.IsDisposed || !this.IsHandleCreated)
+                            {
+                                return;
+                            }
+
+                            try
+                            {
+                                string errorMessage = Resources.Exception_Occurred;
+                                errorMessage += e.Message;
+                                errorMessage += "\n" + e.Source;
+                                errorMessage += "\n" + e.StackTrace;
+                                AddTextBoxControl(errorMessage);
+                            }
+                            catch (ObjectDisposedException disposed)
+                            {
+                                Logger.LogInfo("Preview form was disposed before the WebView2 failure could be shown. " + disposed.Message);
+                            }
+
+                            return;
+                        }
+                        catch (ObjectDisposedException disposed)
+                        {
+                            Logger.LogInfo("Preview form was disposed during WebView2 initialization. " + disposed.Message);
                         }
                     });
                 }

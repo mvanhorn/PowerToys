@@ -224,6 +224,59 @@ public class FileExplorerAddonsTests : UITestBase
             "MonacoPrevHandler");
     }
 
+    [TestMethod("FileExplorerAddons.Preview.SourceCode.Reselection")]
+    [TestCategory("File Explorer Add-ons")]
+    [TestCategory("Preview Pane")]
+    public void MonacoPreviewReselectionStaysResponsiveWithoutExceptionDialog()
+    {
+        // Smoke coverage for repeated selection of temporary .cpp files. Explorer must stay responsive
+        // and must not show the modal .NET unhandled-exception dialog. Containing HRESULT 0x80010108
+        // is the DoPreview callback catch; this test does not inject that fault.
+        AssertShellExtensionRegistration(".cpp", PreviewHandlerShellExtension, MonacoPreviewHandler, "preview handler");
+        PrepareExplorerForRegisteredHandlers();
+
+        var folder = CreateTemporaryFolder();
+        var firstFile = Path.Combine(folder, "first.cpp");
+        var secondFile = Path.Combine(folder, "second.cpp");
+        File.WriteAllText(firstFile, "int first() { return 1; }\n");
+        File.WriteAllText(secondFile, "int second() { return 2; }\n");
+
+        try
+        {
+            var explorer = OpenExplorer(folder);
+            EnsurePreviewPaneOpen(explorer);
+            var handlerLogDirectory = LocalLowHandlerLogDirectory("MonacoPrevHandler");
+            DeleteDirectoryWithRetry(handlerLogDirectory);
+            Assert.IsFalse(
+                Directory.Exists(handlerLogDirectory),
+                "Could not clear the previous MonacoPreviewHandler log before reselection.");
+
+            SelectFile(explorer, firstFile);
+            var handlerLog = WaitForProviderLog(
+                handlerLogDirectory,
+                "Starting PowerToys.MonacoPreviewHandler.exe",
+                ExplorerTimeoutMS);
+            Assert.IsNotNull(
+                handlerLog,
+                "Explorer selected a temporary .cpp file, but did not invoke the PowerToys MonacoPreviewHandler shim.");
+            var handlerLogText = ReadAllTextWithRetry(handlerLog!);
+            Assert.IsFalse(
+                handlerLogText.Contains("Failed to start", StringComparison.OrdinalIgnoreCase),
+                $"The PowerToys MonacoPreviewHandler shim reported a launch failure.{Environment.NewLine}{handlerLogText}");
+            AssertNoUnhandledExceptionDialog();
+
+            SelectFile(explorer, secondFile);
+            AssertNoUnhandledExceptionDialog();
+
+            SelectFile(explorer, firstFile);
+            AssertExplorerRemainsResponsive(explorer, firstFile);
+        }
+        finally
+        {
+            WindowControl.TryCloseByApp("MonacoPreviewHandler", IsUnhandledExceptionDialog, timeoutMS: 2_000);
+        }
+    }
+
     [TestMethod("FileExplorerAddons.Thumbnail.SVG")]
     [TestCategory("File Explorer Add-ons")]
     [TestCategory("Icon Preview")]
@@ -617,6 +670,52 @@ public class FileExplorerAddonsTests : UITestBase
             selection.Succeeded,
             $"Explorer did not establish a stable selection for '{filePath}'. " +
             $"Last focused path: '{selection.LastObservation?.FocusedPath ?? "<none>"}'.");
+    }
+
+    private void AssertExplorerRemainsResponsive(Session explorer, string selectedFile)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(VisualStableTimeoutMS);
+        while (DateTime.UtcNow < deadline)
+        {
+            AssertNoUnhandledExceptionDialog();
+            Assert.IsTrue(
+                WindowsFinder.ListByApp("explorer").Any(window =>
+                    window.Hwnd == explorer.WindowHandle && IsExplorerFileWindow(window)),
+                $"Explorer HWND {explorer.WindowHandle} closed during Monaco reselection. " +
+                $"Current foreground: {WindowControl.GetForegroundWindowInfo()}.");
+            Thread.Sleep(400);
+        }
+
+        SelectFile(explorer, selectedFile);
+        AssertNoUnhandledExceptionDialog();
+    }
+
+    private static void AssertNoUnhandledExceptionDialog()
+    {
+        var dialogs = WindowsFinder.ListAll().Where(IsUnhandledExceptionDialog).ToArray();
+        Assert.AreEqual(
+            0,
+            dialogs.Length,
+            "Monaco preview showed a modal unhandled-exception dialog: " +
+            string.Join(
+                "; ",
+                dialogs.Select(window =>
+                    $"{window.ProcessName} pid={window.ProcessId} class={window.ClassName} title='{window.Title}'")));
+    }
+
+    private static bool IsUnhandledExceptionDialog(WindowsFinder.WindowInfo window)
+    {
+        var monacoHandler = window.ProcessName.Contains("MonacoPreviewHandler", StringComparison.OrdinalIgnoreCase);
+        if (monacoHandler &&
+            (window.Title.Equals("Microsoft .NET", StringComparison.Ordinal) ||
+             window.ClassName.Equals("#32770", StringComparison.OrdinalIgnoreCase) ||
+             window.Title.Contains("Unhandled exception", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return window.ProcessName.Equals("WerFault", StringComparison.OrdinalIgnoreCase) &&
+               window.Title.Contains("MonacoPreviewHandler", StringComparison.OrdinalIgnoreCase);
     }
 
     private void SetExplorerViewAndWait(
